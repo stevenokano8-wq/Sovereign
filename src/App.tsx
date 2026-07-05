@@ -315,6 +315,21 @@ export default function App() {
       setCurrentPrompt("");
     });
 
+    eventSource.addEventListener("plan-awaiting-approval", (e: any) => {
+      const data = JSON.parse(e.data);
+      if (data && Array.isArray(data.tasks)) {
+        setTasks(data.tasks);
+      }
+    });
+
+    eventSource.addEventListener("plan-approved", () => {
+      fetchInitialData();
+    });
+
+    eventSource.addEventListener("plan-rejected", () => {
+      fetchInitialData();
+    });
+
     return () => {
       eventSource.close();
     };
@@ -364,6 +379,25 @@ export default function App() {
       }]);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleApprovalDecision = async (buildId: string, approve: boolean) => {
+    try {
+      const res = await fetch(`/api/tasks/${approve ? "approve" : "reject"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ buildId }),
+      });
+      const data = await res.json();
+      if (data.tasks) {
+        setTasks(data.tasks);
+      }
+      if (data.message) {
+        setMessages(prev => [...prev, data.message]);
+      }
+    } catch (err) {
+      console.error("Failed to resolve approval decision:", err);
     }
   };
 
@@ -773,11 +807,14 @@ export default function App() {
                           const isLocked = tasks.slice(0, tIdx).some(prevTask => prevTask.status !== "completed");
                           const statusColor = task.status === "completed" ? "text-emerald-600 bg-emerald-50/70 border-emerald-150/60" : 
                                               task.status === "running" ? "text-blue-600 bg-blue-50/70 border-blue-150/60 animate-pulse" : 
+                                              task.status === "awaiting_approval" ? "text-amber-600 bg-amber-50/70 border-amber-150/60 animate-pulse" :
                                               "text-slate-400 bg-slate-50/50 border-slate-150/40";
                           const statusIcon = task.status === "completed" ? "🟢" : 
-                                             task.status === "running" ? "🔵" : "⏳";
+                                             task.status === "running" ? "🔵" : 
+                                             task.status === "awaiting_approval" ? "🟡" : "⏳";
                           const statusText = task.status === "completed" ? "Completed" : 
                                              task.status === "running" ? "Running" : 
+                                             task.status === "awaiting_approval" ? "Needs Approval" :
                                              isLocked ? "Locked" : "Pending";
                           return (
                             <div key={task.id} className="flex items-center justify-between text-xs py-1.5 px-3 rounded-xl border border-slate-150/50 bg-white/60 shadow-3xs">
@@ -794,6 +831,42 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
+                  {/* 1b. APPROVAL GATE: Simple request pulled in extra backend/setup work */}
+                  {tasks.some(t => t.requiresApproval && t.status === "awaiting_approval") && (() => {
+                    const gatedTask = tasks.find(t => t.requiresApproval && t.status === "awaiting_approval")!;
+                    return (
+                      <div id="approval-gate-card" className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4 mb-4 shrink-0 shadow-3xs max-w-4xl w-full">
+                        <div className="flex items-start gap-3">
+                          <span className="text-lg shrink-0">🟡</span>
+                          <div className="flex-1 space-y-2">
+                            <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider font-mono">
+                              Approval Needed Before Continuing
+                            </h4>
+                            <p className="text-xs text-amber-900 leading-relaxed">
+                              {gatedTask.approvalReason || "This plan includes extra setup work beyond your request. Approve to continue, or decline to keep it simple."}
+                            </p>
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                id="btn-approve-plan"
+                                onClick={() => handleApprovalDecision(gatedTask.buildId!, true)}
+                                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl transition-colors cursor-pointer"
+                              >
+                                ✓ Approve & Continue
+                              </button>
+                              <button
+                                id="btn-reject-plan"
+                                onClick={() => handleApprovalDecision(gatedTask.buildId!, false)}
+                                className="text-xs font-semibold bg-white hover:bg-amber-100 text-amber-800 border border-amber-200 px-4 py-2 rounded-xl transition-colors cursor-pointer"
+                              >
+                                ✕ Keep It Simple
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Unified Feed Scroll Area */}
                   <div className="flex-1 overflow-y-auto space-y-6 pr-1.5 scrollbar-thin pb-4">
@@ -856,6 +929,7 @@ export default function App() {
                         const isCompleted = task.status === "completed";
                         const isRunning = task.status === "running";
                         const isFailed = task.status === "failed";
+                        const isAwaitingApproval = task.status === "awaiting_approval";
 
                         return (
                           <div key={item.id} className="w-full space-y-4">
@@ -882,38 +956,43 @@ export default function App() {
                                 <div className={`h-2.5 w-2.5 rounded-full ${
                                   isCompleted ? "bg-emerald-500 shadow-emerald-200 shadow-sm" :
                                   isRunning ? "bg-blue-500 animate-pulse shadow-blue-200 shadow-sm" :
-                                  isFailed ? "bg-rose-500 shadow-rose-200 shadow-sm" : "bg-gray-300"
+                                  isFailed ? "bg-rose-500 shadow-rose-200 shadow-sm" :
+                                  isAwaitingApproval ? "bg-amber-400 animate-pulse shadow-amber-200 shadow-sm" : "bg-gray-300"
                                 }`} />
                                 <span className={`text-[10px] font-mono font-bold tracking-wider uppercase ${
                                   isCompleted ? "text-emerald-600" :
                                   isRunning ? "text-blue-600" :
-                                  isFailed ? "text-rose-600" : "text-slate-400"
+                                  isFailed ? "text-rose-600" :
+                                  isAwaitingApproval ? "text-amber-600" : "text-slate-400"
                                 }`}>
-                                  {isCompleted ? "🟢 SUCCESS" : isRunning ? "🔵 ACTIVE" : isFailed ? "🔴 FAILED" : "⏳ LOCKED"}
+                                  {isCompleted ? "🟢 SUCCESS" : isRunning ? "🔵 ACTIVE" : isFailed ? "🔴 FAILED" : isAwaitingApproval ? "🟡 AWAITING APPROVAL" : "⏳ LOCKED"}
                                 </span>
                                 <span className="text-xs text-slate-200">|</span>
                                 <h3 className={`text-xs font-bold font-mono tracking-tight uppercase ${isLocked ? "text-slate-400" : "text-slate-700"}`}>
                                   {isCompleted ? `Completed Task ${taskIndex}: ${task.name}` :
                                    isRunning ? `Executing Task ${taskIndex}: ${task.name}` :
                                    isFailed ? `Failed Task ${taskIndex}: ${task.name}` :
+                                   isAwaitingApproval ? `Task ${taskIndex}: ${task.name} (paused)` :
                                    `Task ${taskIndex}: ${task.name}`}
                                 </h3>
-                                {isLocked && (
+                                {isLocked && !isAwaitingApproval && (
                                   <span className="inline-flex items-center gap-1 text-[9px] font-bold text-slate-400 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-md">
                                     Locked
                                   </span>
                                 )}
                               </div>
 
-                              {/* Phase 3 & 4: Unified Accordion Card */}
-                              <div className={isLocked ? "pointer-events-none select-none" : ""}>
-                                <TaskAccordion 
-                                  task={task} 
-                                  isInitiallyExpanded={index === timeline.length - 1 || isRunning} 
-                                  isLocked={isLocked}
-                                  taskIndex={taskIndex}
-                                />
-                              </div>
+                              {/* Phase 3 & 4: Unified Accordion Card (hidden until the plan is approved / execution has actually started) */}
+                              {!isAwaitingApproval && (
+                                <div className={isLocked ? "pointer-events-none select-none" : ""}>
+                                  <TaskAccordion 
+                                    task={task} 
+                                    isInitiallyExpanded={index === timeline.length - 1 || isRunning} 
+                                    isLocked={isLocked}
+                                    taskIndex={taskIndex}
+                                  />
+                                </div>
+                              )}
                             </div>
                           </div>
                         );

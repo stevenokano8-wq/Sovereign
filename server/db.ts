@@ -93,8 +93,21 @@ export async function initDb(): Promise<DatabaseStatus> {
         status VARCHAR(50) NOT NULL,
         progress INT NOT NULL,
         active_subtask_index INT NOT NULL,
-        created_at VARCHAR(100) NOT NULL
+        created_at VARCHAR(100) NOT NULL,
+        complexity VARCHAR(20),
+        requires_approval BOOLEAN,
+        approval_reason TEXT,
+        build_id VARCHAR(255)
       );
+    `);
+
+    // Backfill columns for tables created before these fields existed.
+    await pgClient.query(`
+      ALTER TABLE tasks
+        ADD COLUMN IF NOT EXISTS complexity VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS requires_approval BOOLEAN,
+        ADD COLUMN IF NOT EXISTS approval_reason TEXT,
+        ADD COLUMN IF NOT EXISTS build_id VARCHAR(255);
     `);
 
     await pgClient.query(`
@@ -229,7 +242,11 @@ export async function getTasks(): Promise<Task[]> {
       progress: row.progress,
       activeSubtaskIndex: row.active_subtask_index,
       createdAt: row.created_at,
-      subtasks: subtasksByTask[row.id] || []
+      subtasks: subtasksByTask[row.id] || [],
+      complexity: row.complexity || undefined,
+      requiresApproval: row.requires_approval ?? undefined,
+      approvalReason: row.approval_reason || undefined,
+      buildId: row.build_id || undefined,
     }));
   } catch (err) {
     console.error("Failed to fetch tasks from Postgres:", err);
@@ -255,13 +272,13 @@ export async function saveTask(task: Task): Promise<void> {
     const check = await pgClient!.query("SELECT id FROM tasks WHERE id = $1", [task.id]);
     if (check.rows.length > 0) {
       await pgClient!.query(
-        "UPDATE tasks SET name = $1, status = $2, progress = $3, active_subtask_index = $4 WHERE id = $5",
-        [task.name, task.status, task.progress, task.activeSubtaskIndex, task.id]
+        "UPDATE tasks SET name = $1, status = $2, progress = $3, active_subtask_index = $4, complexity = $5, requires_approval = $6, approval_reason = $7, build_id = $8 WHERE id = $9",
+        [task.name, task.status, task.progress, task.activeSubtaskIndex, task.complexity || null, task.requiresApproval ?? null, task.approvalReason || null, task.buildId || null, task.id]
       );
     } else {
       await pgClient!.query(
-        "INSERT INTO tasks (id, name, status, progress, active_subtask_index, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-        [task.id, task.name, task.status, task.progress, task.activeSubtaskIndex, task.createdAt]
+        "INSERT INTO tasks (id, name, status, progress, active_subtask_index, created_at, complexity, requires_approval, approval_reason, build_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        [task.id, task.name, task.status, task.progress, task.activeSubtaskIndex, task.createdAt, task.complexity || null, task.requiresApproval ?? null, task.approvalReason || null, task.buildId || null]
       );
     }
 
@@ -282,6 +299,22 @@ export async function saveTask(task: Task): Promise<void> {
     }
   } catch (err) {
     console.error("Failed to upsert task in Postgres:", err);
+  }
+}
+
+export async function deleteTaskById(taskId: string): Promise<void> {
+  if (useLocalJson) {
+    loadLocalDb();
+    localDb.tasks = localDb.tasks.filter(t => t.id !== taskId);
+    saveLocalDb();
+    return;
+  }
+
+  try {
+    await pgClient!.query("DELETE FROM subtasks WHERE task_id = $1", [taskId]);
+    await pgClient!.query("DELETE FROM tasks WHERE id = $1", [taskId]);
+  } catch (err) {
+    console.error("Failed to delete task from Postgres:", err);
   }
 }
 

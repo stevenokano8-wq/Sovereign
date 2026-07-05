@@ -7,9 +7,9 @@ import dotenv from "dotenv";
 // Load environment variables
 dotenv.config();
 
-import { initDb, getMessages, addMessage, clearMessages, getTasks, deleteTasks, getFiles, clearFiles, saveFile } from "./server/db.js";
+import { initDb, getMessages, addMessage, clearMessages, getTasks, deleteTasks, deleteTaskById, getFiles, clearFiles, saveFile } from "./server/db.js";
 import { initRedis, redisFlush } from "./server/redis.js";
-import { planBuildTasks, executeAgentBuild, sseClients, broadcastSSE } from "./server/agent.js";
+import { planBuildTasks, executeAgentBuild, sseClients, broadcastSSE, registerPendingApproval, getPendingApproval, clearPendingApproval, buildSimpleFallbackTasks } from "./server/agent.js";
 import { DatabaseStatus, Message } from "./src/types.js";
 
 const app = express();
@@ -76,8 +76,17 @@ app.post("/api/messages", async (req, res) => {
           await saveTaskWithRetry(task);
         }
 
-        // Trigger background asynchronous compilation/synthesis worker
-        executeAgentBuild(content, plannedTasks);
+        // If the plan needs the user's sign-off (e.g. a "simple" request that would have
+        // pulled in backend/setup work), pause here instead of executing automatically.
+        const needsApproval = plannedTasks.some(t => t.requiresApproval);
+        if (needsApproval) {
+          const buildId = plannedTasks.find(t => t.buildId)?.buildId || `build-${Date.now()}`;
+          registerPendingApproval(buildId, content, plannedTasks);
+          broadcastSSE("plan-awaiting-approval", { buildId, tasks: plannedTasks });
+        } else {
+          // Trigger background asynchronous compilation/synthesis worker
+          executeAgentBuild(content, plannedTasks);
+        }
 
         res.json({ message: userMsg, tasks: plannedTasks });
       } catch (agentErr: any) {
@@ -89,6 +98,96 @@ app.post("/api/messages", async (req, res) => {
     }
   } catch (err: any) {
     console.error("API messages insert error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Approve a plan that was paused awaiting user sign-off (e.g. extra backend/setup work)
+app.post("/api/tasks/approve", async (req, res) => {
+  try {
+    const { buildId } = req.body;
+    if (!buildId) {
+      return res.status(400).json({ error: "buildId is required" });
+    }
+
+    const pending = getPendingApproval(buildId);
+    if (!pending) {
+      return res.status(404).json({ error: "No pending build found for that buildId" });
+    }
+
+    const approvedTasks = pending.tasks.map((t, idx) => ({
+      ...t,
+      status: idx === 0 ? ("pending" as const) : t.status,
+      requiresApproval: false,
+      approvalReason: undefined,
+    }));
+
+    for (const task of approvedTasks) {
+      await saveTaskWithRetry(task);
+    }
+
+    clearPendingApproval(buildId);
+    broadcastSSE("plan-approved", { buildId });
+
+    executeAgentBuild(pending.prompt, approvedTasks);
+
+    res.json({ status: "success", tasks: approvedTasks });
+  } catch (err: any) {
+    console.error("API tasks approve error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Reject/cancel a plan that was paused awaiting user sign-off
+app.post("/api/tasks/reject", async (req, res) => {
+  try {
+    const { buildId } = req.body;
+    if (!buildId) {
+      return res.status(400).json({ error: "buildId is required" });
+    }
+
+    const pending = getPendingApproval(buildId);
+    if (!pending) {
+      return res.status(404).json({ error: "No pending build found for that buildId" });
+    }
+
+    // "Keep It Simple": don't cancel the request outright — re-plan it as a bare,
+    // no-backend task so the user's original intent is still fulfilled.
+    // Remove the original pending task rows first so we don't end up with duplicates
+    // alongside the freshly-generated simplified task.
+    for (const task of pending.tasks) {
+      await deleteTaskById(task.id);
+    }
+
+    const simplifiedTasks = buildSimpleFallbackTasks(pending.prompt).map((t, idx) => ({
+      ...t,
+      status: idx === 0 ? ("pending" as const) : t.status,
+      complexity: "simple" as const,
+      requiresApproval: false,
+      approvalReason: undefined,
+    }));
+
+    for (const task of simplifiedTasks) {
+      await saveTaskWithRetry(task);
+    }
+
+    clearPendingApproval(buildId);
+
+    const systemMsg: Message = {
+      id: `msg-${Date.now()}-system`,
+      role: "system",
+      content: "Kept it simple — proceeding without the extra backend/setup work.",
+      timestamp: new Date().toISOString(),
+    };
+    await addMessage(systemMsg);
+
+    broadcastSSE("plan-rejected", { buildId });
+
+    executeAgentBuild(pending.prompt, simplifiedTasks);
+
+    res.json({ status: "success", tasks: simplifiedTasks, message: systemMsg });
+  } catch (err: any) {
+    console.error("API tasks reject error:", err);
     res.status(500).json({ error: err.message });
   }
 });

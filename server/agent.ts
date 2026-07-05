@@ -38,16 +38,71 @@ export function broadcastSSE(event: string, data: any) {
   }
 }
 
-// Generates tasks and subtasks structure based on a user prompt
+// Hard keywords: the user is unambiguously asking for backend/infra work, so no approval
+// gate is needed — building it is exactly what they asked for.
+const HARD_BACKEND_KEYWORDS = [
+  "backend", "back-end", "full stack", "fullstack", "full-stack", "database", "postgres",
+  "sql database", "redis", "api endpoint", "rest api", "server-side", "authentication system",
+  "payment integration", "stripe", "websocket server", "migration", "cron job", "message queue"
+];
+
+// Soft keywords: often just describe a small UI element (e.g. "add a login button"), but can
+// also imply real backend/auth plumbing. These never force a full-stack plan on their own —
+// instead they cause the (still-simple) plan to be flagged for the user's explicit approval.
+const SOFT_AMBIGUOUS_KEYWORDS = [
+  "login", "log in", "sign up", "signup", "auth", "authentication", "password", "session",
+  "user account", "payment", "checkout"
+];
+
+// Keywords that indicate backend/infra-flavored subtask content even when not explicitly requested
+const BACKEND_FLAVORED_KEYWORDS = [
+  "backend", "back-end", "database", "postgres", "sql", "redis", "server", "api endpoint",
+  "rest api", "auth", "login", "authentication", "payment", "websocket", "schema", "migration",
+  "endpoint", "cache", "session"
+];
+
+function containsAny(text: string, keywords: string[]): string[] {
+  const lower = text.toLowerCase();
+  return keywords.filter(k => lower.includes(k));
+}
+
+// Determines whether a request explicitly calls for a full frontend + backend application
+// ("complex"), is a small self-contained task ("simple"), or is a small task that merely
+// mentions something backend-adjacent (e.g. "login button") and should be flagged for
+// approval rather than silently assumed either way.
+function classifyRequest(userPrompt: string): { isSimple: boolean; softMatches: string[] } {
+  const hardMatches = containsAny(userPrompt, HARD_BACKEND_KEYWORDS);
+  if (hardMatches.length > 0) {
+    return { isSimple: false, softMatches: [] };
+  }
+  const softMatches = containsAny(userPrompt, SOFT_AMBIGUOUS_KEYWORDS);
+  return { isSimple: true, softMatches };
+}
+
+// Generates tasks and subtasks structure based on a user prompt.
+// Simple requests (e.g. "create a folder") are kept to a single lightweight task with
+// no backend/database/setup work. If the model still returns backend-flavored subtasks
+// for a request that never asked for them, we flag the plan so the UI can ask the user
+// for approval before any of that extra work is executed.
 export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
+  const { isSimple, softMatches } = classifyRequest(userPrompt);
+
+  let parsedTasks: Task[];
+
   try {
     const ai = getGeminiClient();
-    console.log("Planning build tasks using Gemini...");
+    console.log(`Planning build tasks using Gemini... (classified as ${isSimple ? "simple" : "complex"})`);
+
+    const contents = isSimple
+      ? `You are Sovereign Agent, a precise coding assistant. The user's request is small and self-contained: "${userPrompt}".
+      Break it down into EXACTLY 1 task with 2-3 short, concrete subtasks that only touch the filesystem/UI needed for this exact request.
+      Do NOT invent backend, API, database, authentication, or server setup work — the user did not ask for any of that.`
+      : `You are Sovereign Agent, an expert full-stack developer. Break down this request into exactly 3 key developmental tasks. Each task should have exactly 3-4 subtasks.
+      Request: "${userPrompt}"`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
-      contents: `You are Sovereign Agent, an expert full-stack developer. Break down this request into exactly 3 key developmental tasks. Each task should have exactly 3-4 subtasks.
-      Request: "${userPrompt}"`,
+      contents,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -82,7 +137,7 @@ export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
     });
 
     const result = JSON.parse(response.text || "{}");
-    const parsedTasks: Task[] = (result.tasks || []).map((t: any, idx: number) => {
+    parsedTasks = (result.tasks || []).map((t: any, idx: number) => {
       const taskId = `task-${Date.now()}-${idx}`;
       return {
         id: taskId,
@@ -100,56 +155,132 @@ export async function planBuildTasks(userPrompt: string): Promise<Task[]> {
         }))
       };
     });
-
-    return parsedTasks;
   } catch (err: any) {
     console.error("Failed planning build tasks with Gemini, creating default template tasks:", err.message);
-    // Fallback tasks if Gemini is offline or API key is missing
-    const taskId1 = `task-${Date.now()}-0`;
-    const taskId2 = `task-${Date.now()}-1`;
-    const taskId3 = `task-${Date.now()}-2`;
-    return [
-      {
-        id: taskId1,
-        name: "Establish Architectural Blueprint",
-        status: "pending",
-        progress: 0,
-        activeSubtaskIndex: 0,
-        createdAt: new Date().toISOString(),
-        subtasks: [
-          { id: `${taskId1}-sub-0`, taskId: taskId1, name: "Plan relational tables and Redis cache schema", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId1}-sub-1`, taskId: taskId1, name: "Initialize server boilerplate & setup API proxies", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId1}-sub-2`, taskId: taskId1, name: "Establish layout and dark/light UI boundaries", status: "pending", logs: ["Waiting..."] }
-        ]
-      },
-      {
-        id: taskId2,
-        name: "Develop Core Server Interfaces",
-        status: "pending",
-        progress: 0,
-        activeSubtaskIndex: 0,
-        createdAt: new Date().toISOString(),
-        subtasks: [
-          { id: `${taskId2}-sub-0`, taskId: taskId2, name: "Implement Express REST endpoints", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId2}-sub-1`, taskId: taskId2, name: "Integrate database client queries with fail-safes", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId2}-sub-2`, taskId: taskId2, name: "Configure Redis caching logic for sessions", status: "pending", logs: ["Waiting..."] }
-        ]
-      },
-      {
-        id: taskId3,
-        name: "Build High Fidelity Layout",
-        status: "pending",
-        progress: 0,
-        activeSubtaskIndex: 0,
-        createdAt: new Date().toISOString(),
-        subtasks: [
-          { id: `${taskId3}-sub-0`, taskId: taskId3, name: "Build interactive workspace and file list UI", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId3}-sub-1`, taskId: taskId3, name: "Wire-up WebSocket connection logs and charts", status: "pending", logs: ["Waiting..."] },
-          { id: `${taskId3}-sub-2`, taskId: taskId3, name: "Deploy visual state check and finish review", status: "pending", logs: ["Waiting..."] }
-        ]
-      }
-    ];
+    parsedTasks = isSimple ? buildSimpleFallbackTasks(userPrompt) : buildComplexFallbackTasks();
   }
+
+  return applyComplexityGuardrails(userPrompt, isSimple, parsedTasks, softMatches);
+}
+
+// Simple, single-task fallback plan used when Gemini is unavailable for a small request.
+export function buildSimpleFallbackTasks(userPrompt: string): Task[] {
+  const taskId = `task-${Date.now()}-0`;
+  return [
+    {
+      id: taskId,
+      name: `Handle request: "${userPrompt}"`,
+      status: "pending",
+      progress: 0,
+      activeSubtaskIndex: 0,
+      createdAt: new Date().toISOString(),
+      subtasks: [
+        { id: `${taskId}-sub-0`, taskId, name: "Locate and validate the target file/folder path", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId}-sub-1`, taskId, name: "Apply the requested filesystem/UI change", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId}-sub-2`, taskId, name: "Verify the change is reflected in the workspace", status: "pending", logs: ["Waiting..."] }
+      ]
+    }
+  ];
+}
+
+// Fallback tasks if Gemini is offline or API key is missing, for genuinely complex/full-stack asks.
+function buildComplexFallbackTasks(): Task[] {
+  const taskId1 = `task-${Date.now()}-0`;
+  const taskId2 = `task-${Date.now()}-1`;
+  const taskId3 = `task-${Date.now()}-2`;
+  return [
+    {
+      id: taskId1,
+      name: "Establish Architectural Blueprint",
+      status: "pending",
+      progress: 0,
+      activeSubtaskIndex: 0,
+      createdAt: new Date().toISOString(),
+      subtasks: [
+        { id: `${taskId1}-sub-0`, taskId: taskId1, name: "Plan relational tables and Redis cache schema", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId1}-sub-1`, taskId: taskId1, name: "Initialize server boilerplate & setup API proxies", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId1}-sub-2`, taskId: taskId1, name: "Establish layout and dark/light UI boundaries", status: "pending", logs: ["Waiting..."] }
+      ]
+    },
+    {
+      id: taskId2,
+      name: "Develop Core Server Interfaces",
+      status: "pending",
+      progress: 0,
+      activeSubtaskIndex: 0,
+      createdAt: new Date().toISOString(),
+      subtasks: [
+        { id: `${taskId2}-sub-0`, taskId: taskId2, name: "Implement Express REST endpoints", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId2}-sub-1`, taskId: taskId2, name: "Integrate database client queries with fail-safes", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId2}-sub-2`, taskId: taskId2, name: "Configure Redis caching logic for sessions", status: "pending", logs: ["Waiting..."] }
+      ]
+    },
+    {
+      id: taskId3,
+      name: "Build High Fidelity Layout",
+      status: "pending",
+      progress: 0,
+      activeSubtaskIndex: 0,
+      createdAt: new Date().toISOString(),
+      subtasks: [
+        { id: `${taskId3}-sub-0`, taskId: taskId3, name: "Build interactive workspace and file list UI", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId3}-sub-1`, taskId: taskId3, name: "Wire-up WebSocket connection logs and charts", status: "pending", logs: ["Waiting..."] },
+        { id: `${taskId3}-sub-2`, taskId: taskId3, name: "Deploy visual state check and finish review", status: "pending", logs: ["Waiting..."] }
+      ]
+    }
+  ];
+}
+
+// If the request was classified as "simple" but the generated plan still smuggled in
+// backend/database/setup-flavored subtasks, flag the whole plan as awaiting the user's
+// explicit approval rather than silently executing extra work they never asked for.
+function applyComplexityGuardrails(userPrompt: string, isSimple: boolean, tasks: Task[], softMatches: string[] = []): Task[] {
+  if (tasks.length === 0) return tasks;
+
+  if (!isSimple) {
+    return tasks.map(t => ({ ...t, complexity: "complex" as const, requiresApproval: false }));
+  }
+
+  const flavoredHits = new Set<string>(softMatches);
+  for (const task of tasks) {
+    for (const sub of task.subtasks) {
+      for (const hit of containsAny(`${task.name} ${sub.name}`, BACKEND_FLAVORED_KEYWORDS)) {
+        flavoredHits.add(hit);
+      }
+    }
+  }
+
+  const buildId = `build-${Date.now()}`;
+
+  if (flavoredHits.size > 0) {
+    const reason = `Your request "${userPrompt}" looked like a simple task, but the generated plan includes backend/setup-flavored work (${Array.from(flavoredHits).join(", ")}) that wasn't explicitly requested. Approve to proceed with this extra work, or decline to keep it simple.`;
+    return tasks.map((t, idx) => ({
+      ...t,
+      complexity: "simple" as const,
+      requiresApproval: idx === 0,
+      approvalReason: idx === 0 ? reason : undefined,
+      buildId,
+      status: "awaiting_approval" as const,
+    }));
+  }
+
+  return tasks.map(t => ({ ...t, complexity: "simple" as const, requiresApproval: false, buildId }));
+}
+
+// In-memory registry of plans that are paused, waiting on user approval before any
+// execution begins. Keyed by buildId.
+export const pendingApprovals = new Map<string, { prompt: string; tasks: Task[] }>();
+
+export function registerPendingApproval(buildId: string, prompt: string, tasks: Task[]) {
+  pendingApprovals.set(buildId, { prompt, tasks });
+}
+
+export function getPendingApproval(buildId: string) {
+  return pendingApprovals.get(buildId);
+}
+
+export function clearPendingApproval(buildId: string) {
+  pendingApprovals.delete(buildId);
 }
 
 // Background builder that executes subtasks sequentially
@@ -266,7 +397,7 @@ export async function executeAgentBuild(prompt: string, tasks: Task[]) {
 
   // Create final agent response message in the chat
   const assistantMsg: Message = {
-    id: `msg-${Date.now()}-finish`,
+    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-finish`,
     role: "assistant",
     content: `### Sovereign Agent Task Report
 I have successfully designed, built, and deployed the full stack components for **"${prompt}"**! 

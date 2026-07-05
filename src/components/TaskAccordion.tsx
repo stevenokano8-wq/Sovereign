@@ -175,15 +175,11 @@ export default function TaskAccordion({
     }
   }, [task.status]);
   
-  // Track open/closed state for each chapter's action card
-  const [openSubtaskChapters, setOpenSubtaskChapters] = useState<Record<string, boolean>>({
-    "ch-1": true,
-    "ch-default": true,
-    "ch-db": true,
-    "ch-verify": true,
-    "ch-gen-single": true,
-    "ch-gen-1": true,
-  });
+  // Track open/closed state for each chapter's action card. All chapters start closed by
+  // default (undefined = no manual override yet) — they only auto-open while a subtask
+  // inside them is actively running/failed, and stay closed otherwise until the user
+  // explicitly clicks to expand them.
+  const [openSubtaskChapters, setOpenSubtaskChapters] = useState<Record<string, boolean>>({});
 
   const uniqueFilesTouched = Array.from(
     new Set(
@@ -423,9 +419,15 @@ export default function TaskAccordion({
             {/* Chapters rendering sequentially - connected by timeline border */}
             <div className="pl-4 sm:pl-5 border-l border-slate-150/60 ml-3.5 space-y-5 pt-3.5 mt-0.5">
               {chapters.map(chapter => {
-                const isChapterExpanded = !!openSubtaskChapters[chapter.id];
+                const chapterHasActiveSubtask = chapter.subtasks.some(sub => sub.status === "running" || sub.status === "failed");
+                const chapterAllCompleted = chapter.subtasks.length > 0 && chapter.subtasks.every(sub => sub.status === "completed");
+                // Closed by default; auto-opens while a subtask inside is active, unless the
+                // user has manually toggled this chapter (their choice always wins).
+                const isChapterExpanded = openSubtaskChapters[chapter.id] !== undefined
+                  ? openSubtaskChapters[chapter.id]
+                  : chapterHasActiveSubtask;
                 const toggleChapter = (id: string) => {
-                  setOpenSubtaskChapters(prev => ({ ...prev, [id]: !prev[id] }));
+                  setOpenSubtaskChapters(prev => ({ ...prev, [id]: !isChapterExpanded }));
                 };
 
                 return (
@@ -461,6 +463,12 @@ export default function TaskAccordion({
                             <span className="text-[10.5px] font-mono font-bold text-gray-500 uppercase tracking-wider ml-1">
                               {chapter.subtasks.length} actions
                             </span>
+                            {chapterAllCompleted && (
+                              <span className="inline-flex items-center gap-1 text-[9px] font-bold text-emerald-600 bg-emerald-50/60 px-1.5 py-0.5 rounded-full border border-emerald-150/50 select-none shrink-0 ml-1">
+                                <span className="h-1 w-1 rounded-full bg-emerald-500" />
+                                ✓ Done
+                              </span>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-1.5 text-gray-400">

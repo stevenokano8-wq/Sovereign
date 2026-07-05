@@ -9,11 +9,15 @@ export interface Message {
 export interface Task {
   id: string;
   name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'awaiting_approval';
   progress: number; // 0 to 100
   activeSubtaskIndex: number;
   createdAt: string;
   subtasks: Subtask[];
+  complexity?: 'simple' | 'complex';
+  requiresApproval?: boolean;
+  approvalReason?: string;
+  buildId?: string;
 }
 
 export interface Subtask {
