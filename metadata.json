@@ -1,0 +1,6 @@
+{
+  "name": "Sovereign Agent Workspace",
+  "description": "A high-fidelity full-stack coding agent dashboard featuring live task streaming, step-by-step progress bars, code previews, and persistent PostgreSQL and Redis storage options.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
